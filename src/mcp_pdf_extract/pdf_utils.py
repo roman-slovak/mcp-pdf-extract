@@ -2,11 +2,39 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # 50KB host limit (mcp_ollama_host/mcp_pool.py:MAX_RESULT_BYTES) minus ~10KB rezerva
 # pre JSON-encoding overhead a wrapping. Tools nesmú vrátiť odpoveď väčšiu ako toto.
 RESPONSE_BUDGET_BYTES = 40_000
+
+# When the caller gives a bare filename (no directory component), search here in order.
+# Weaker models often forward just the filename from chat context, and the server's CWD
+# is set by `uv --directory` to its own project root — which is almost never useful.
+_DEFAULT_SEARCH_DIRS = (
+    Path.cwd,
+    lambda: Path.home() / "Downloads",
+    lambda: Path.home() / "Documents",
+    lambda: Path.home() / "Desktop",
+)
+
+
+def _is_bare_filename(path: str) -> bool:
+    """True when ``path`` is a single name with no directory component or tilde prefix."""
+    stripped = path.strip()
+    if not stripped or stripped.startswith("~") or stripped.startswith("/"):
+        return False
+    return os.sep not in stripped and "/" not in stripped
+
+
+def _search_for_bare_filename(name: str) -> Path | None:
+    """Return the first existing candidate from the default search dirs, else ``None``."""
+    for resolver in _DEFAULT_SEARCH_DIRS:
+        candidate = (resolver() / name).resolve()
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 class PdfPathError(ValueError):
@@ -16,13 +44,27 @@ class PdfPathError(ValueError):
 def resolve_pdf_path(path: str) -> Path:
     """Expand ``~``, resolve to absolute path, and validate that it points to a PDF file.
 
+    If ``path`` is a bare filename (no directory component), search the user's common
+    locations (CWD, ~/Downloads, ~/Documents, ~/Desktop) before failing — this is the
+    case weak models hit when they forward just the filename from chat context.
+
     Validation kept liberal: existing regular file ending in ``.pdf`` (case-insensitive).
     Magic-byte sniffing is the PDF library's job — duplicating it here would only desync.
     """
     if not path or not path.strip():
         raise PdfPathError("path must be a non-empty string")
 
-    resolved = Path(path).expanduser().resolve()
+    if _is_bare_filename(path):
+        found = _search_for_bare_filename(path.strip())
+        if found is None:
+            searched = ", ".join(str(r()) for r in _DEFAULT_SEARCH_DIRS)
+            raise PdfPathError(
+                f"file not found: {path!r} (searched: {searched}). "
+                f"Pass an absolute path to bypass the search."
+            )
+        resolved = found
+    else:
+        resolved = Path(path).expanduser().resolve()
 
     if not resolved.exists():
         raise PdfPathError(f"file not found: {resolved}")

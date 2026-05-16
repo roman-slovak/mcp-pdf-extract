@@ -62,6 +62,60 @@ class TestResolvePdfPath:
             resolve_pdf_path(str(f))
 
 
+class TestBareFilenameSearch:
+    """A bare filename (no path component) triggers a small search across common dirs.
+
+    Weak models often forward only the filename from chat context, and the server's CWD
+    is set to its own project root by ``uv --directory`` — so resolving relative to CWD
+    alone would always miss.
+    """
+
+    def test_found_in_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        pdf = tmp_path / "in_cwd.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n%fake\n")
+        monkeypatch.chdir(tmp_path)
+        assert resolve_pdf_path("in_cwd.pdf") == pdf.resolve()
+
+    def test_found_in_downloads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Sandbox HOME so we don't depend on the user's real ~/Downloads.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        downloads = tmp_path / "Downloads"
+        downloads.mkdir()
+        pdf = downloads / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n%fake\n")
+        # Move CWD somewhere that doesn't contain the file so search must continue.
+        other = tmp_path / "other"
+        other.mkdir()
+        monkeypatch.chdir(other)
+        assert resolve_pdf_path("report.pdf") == pdf.resolve()
+
+    def test_missing_lists_searched_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(PdfPathError) as exc:
+            resolve_pdf_path("missing.pdf")
+        msg = str(exc.value)
+        assert "missing.pdf" in msg
+        assert "Downloads" in msg  # at least one of the searched dirs is named
+
+    def test_path_with_separator_skips_search(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Even if a file with the same name exists in ~/Downloads, an explicit
+        # relative path with a separator must NOT fall back to the search.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "Downloads").mkdir()
+        decoy = tmp_path / "Downloads" / "x.pdf"
+        decoy.write_bytes(b"%PDF-1.4\n%fake\n")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(PdfPathError, match="not found"):
+            resolve_pdf_path("./nowhere/x.pdf")
+
+
 class TestClampPage:
     def test_in_range(self) -> None:
         assert clamp_page(1, 5) == 0
