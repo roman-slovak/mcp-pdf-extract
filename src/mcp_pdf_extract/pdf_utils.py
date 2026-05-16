@@ -2,51 +2,30 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 # 50KB host limit (mcp_ollama_host/mcp_pool.py:MAX_RESULT_BYTES) minus ~10KB rezerva
 # pre JSON-encoding overhead a wrapping. Tools nesmú vrátiť odpoveď väčšiu ako toto.
 RESPONSE_BUDGET_BYTES = 40_000
 
-# When the caller gives a bare filename (no directory component), search here in order.
-# Weaker models often forward just the filename from chat context, and the server's CWD
-# is set by `uv --directory` to its own project root — which is almost never useful.
-_DEFAULT_SEARCH_DIRS = (
-    Path.cwd,
-    lambda: Path.home() / "Downloads",
-    lambda: Path.home() / "Documents",
-    lambda: Path.home() / "Desktop",
-)
-
-
-def _is_bare_filename(path: str) -> bool:
-    """True when ``path`` is a single name with no directory component or tilde prefix."""
-    stripped = path.strip()
-    if not stripped or stripped.startswith("~") or stripped.startswith("/"):
-        return False
-    return os.sep not in stripped and "/" not in stripped
-
-
-def _search_for_bare_filename(name: str) -> Path | None:
-    """Return the first existing candidate from the default search dirs, else ``None``."""
-    for resolver in _DEFAULT_SEARCH_DIRS:
-        candidate = (resolver() / name).resolve()
-        if candidate.is_file():
-            return candidate
-    return None
-
 
 class PdfPathError(ValueError):
     """Raised when a provided path is not a usable PDF file."""
 
 
+def _looks_like_bare_filename(path: str) -> bool:
+    """Heuristic: did the caller pass just a filename with no directory hint?"""
+    stripped = path.strip()
+    return bool(stripped) and "/" not in stripped and "\\" not in stripped
+
+
 def resolve_pdf_path(path: str) -> Path:
     """Expand ``~``, resolve to absolute path, and validate that it points to a PDF file.
 
-    If ``path`` is a bare filename (no directory component), search the user's common
-    locations (CWD, ~/Downloads, ~/Documents, ~/Desktop) before failing — this is the
-    case weak models hit when they forward just the filename from chat context.
+    The server does not search anywhere — the caller is responsible for providing a
+    usable path (absolute or relative to the caller's CWD). When a bare filename is
+    given and missing, the error explicitly nudges the caller to pass an absolute path,
+    since the server's own CWD is almost never what the model has in mind.
 
     Validation kept liberal: existing regular file ending in ``.pdf`` (case-insensitive).
     Magic-byte sniffing is the PDF library's job — duplicating it here would only desync.
@@ -54,19 +33,15 @@ def resolve_pdf_path(path: str) -> Path:
     if not path or not path.strip():
         raise PdfPathError("path must be a non-empty string")
 
-    if _is_bare_filename(path):
-        found = _search_for_bare_filename(path.strip())
-        if found is None:
-            searched = ", ".join(str(r()) for r in _DEFAULT_SEARCH_DIRS)
-            raise PdfPathError(
-                f"file not found: {path!r} (searched: {searched}). "
-                f"Pass an absolute path to bypass the search."
-            )
-        resolved = found
-    else:
-        resolved = Path(path).expanduser().resolve()
+    resolved = Path(path).expanduser().resolve()
 
     if not resolved.exists():
+        if _looks_like_bare_filename(path):
+            raise PdfPathError(
+                f"file not found: {resolved}. The path was a bare filename and the "
+                f"server resolved it against its own CWD. Pass an absolute path "
+                f"(e.g. /Users/<you>/Downloads/{path.strip()})."
+            )
         raise PdfPathError(f"file not found: {resolved}")
     if not resolved.is_file():
         raise PdfPathError(f"not a regular file: {resolved}")
