@@ -34,6 +34,14 @@ _PATH_DESCRIPTION = (
 )
 PathArg = Annotated[str, Field(description=_PATH_DESCRIPTION)]
 
+# Anti-hallucination nudge baked into every metadata-only response. A weak model that
+# only sees title/subject will otherwise invent contents from the title alone.
+_CONTENT_HINT = (
+    "This response contains NO document text. Title and subject are NOT the contents. "
+    "To answer ANY question about what the document says or contains, you MUST call "
+    "pdf__extract_text (or pdf__search_text) on this path before replying."
+)
+
 
 def _stringify(value: Any) -> str | None:
     """Best-effort string conversion for pypdf metadata values (which may be PDF objects)."""
@@ -47,7 +55,12 @@ def _stringify(value: Any) -> str | None:
 
 @mcp.tool()
 def get_metadata(path: PathArg) -> dict[str, Any]:
-    """Return PDF metadata: title, author, dates, page count, encryption status."""
+    """Return PDF metadata ONLY: title, author, dates, page count, encryption status.
+
+    Does NOT return document text or content. The title is a label, not a summary.
+    To answer "what is in the document", "summarize", or any question about contents,
+    call ``pdf__extract_text`` after this — do not guess from the title.
+    """
     pdf_path = resolve_pdf_path(path)
     reader = pypdf.PdfReader(str(pdf_path))
     meta = reader.metadata
@@ -62,15 +75,19 @@ def get_metadata(path: PathArg) -> dict[str, Any]:
         "producer": _stringify(meta.producer) if meta else None,
         "creation_date": _stringify(meta.creation_date) if meta else None,
         "modification_date": _stringify(meta.modification_date) if meta else None,
+        "note": _CONTENT_HINT,
     }
 
 
 @mcp.tool()
-def get_page_count(path: PathArg) -> dict[str, int]:
-    """Return the number of pages in the PDF."""
+def get_page_count(path: PathArg) -> dict[str, Any]:
+    """Return the number of pages in the PDF.
+
+    Does NOT return any text. Use ``pdf__extract_text`` to actually read pages.
+    """
     pdf_path = resolve_pdf_path(path)
     reader = pypdf.PdfReader(str(pdf_path))
-    return {"page_count": len(reader.pages)}
+    return {"page_count": len(reader.pages), "note": _CONTENT_HINT}
 
 
 def _extract_page_text(page: pdfplumber.page.Page) -> str:
@@ -103,10 +120,13 @@ def extract_text(
         ),
     ] = None,
 ) -> dict[str, Any]:
-    """Extract text from a page range. 1-indexed, inclusive.
+    """Extract the actual text from a page range. THIS is the tool to call whenever
+    the user asks "what is in the document", "summarize", "what does it say", or any
+    question about contents. Do not infer contents from the title or metadata.
 
-    Stops early if the accumulated response would exceed ~40KB and reports ``has_more``
-    with ``next_page`` so the caller can resume. Single-page calls always succeed even
+    Page numbers are 1-indexed, inclusive. Stops early if the accumulated response
+    would exceed ~40KB and reports ``has_more`` with ``next_page`` so you can call
+    again from ``next_page`` to keep reading. Single-page calls always succeed even
     if that page is huge (the page text gets truncated with a marker).
     """
     pdf_path = resolve_pdf_path(path)
@@ -301,14 +321,18 @@ def _flatten_outline(
 
 @mcp.tool()
 def get_outline(path: PathArg) -> dict[str, Any]:
-    """Return the PDF's table of contents (bookmarks) as a flat list, or empty if none."""
+    """Return the PDF's table of contents (bookmarks) as a flat list, or empty if none.
+
+    Outline titles are chapter labels, not contents. Use ``pdf__extract_text`` on
+    the page numbers from the outline to actually read those sections.
+    """
     pdf_path = resolve_pdf_path(path)
     reader = pypdf.PdfReader(str(pdf_path))
     try:
         flat = _flatten_outline(list(reader.outline), reader)
     except Exception:
         flat = []
-    return {"path": str(pdf_path), "outline": flat}
+    return {"path": str(pdf_path), "outline": flat, "note": _CONTENT_HINT}
 
 
 def main() -> None:

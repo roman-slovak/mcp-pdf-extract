@@ -40,10 +40,12 @@ class TestGetMetadata:
 
 class TestGetPageCount:
     def test_simple_pdf(self, simple_pdf: Path) -> None:
-        assert get_page_count(str(simple_pdf)) == {"page_count": 3}
+        result = get_page_count(str(simple_pdf))
+        assert result["page_count"] == 3
+        assert "note" in result  # anti-hallucination nudge
 
     def test_large_pdf(self, large_pdf: Path) -> None:
-        assert get_page_count(str(large_pdf)) == {"page_count": 80}
+        assert get_page_count(str(large_pdf))["page_count"] == 80
 
 
 class TestExtractText:
