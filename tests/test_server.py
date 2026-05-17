@@ -49,19 +49,26 @@ class TestGetPageCount:
 
 
 class TestExtractText:
-    def test_single_page_default(self, simple_pdf: Path) -> None:
+    def test_default_reads_to_end_of_doc(self, simple_pdf: Path) -> None:
+        """Calling without end_page reads from `page` to the last page (budget-permitting)."""
         result = extract_text(str(simple_pdf))
         assert result["page_count"] == 3
-        assert len(result["pages"]) == 1
-        assert result["pages"][0]["page"] == 1
+        assert [p["page"] for p in result["pages"]] == [1, 2, 3]
         assert "First page header" in result["pages"][0]["text"]
         assert result["has_more"] is False
-        assert result["next_page"] == 2
+        assert result["next_page"] is None
 
-    def test_specific_page(self, simple_pdf: Path) -> None:
-        result = extract_text(str(simple_pdf), page=3)
-        assert result["pages"][0]["page"] == 3
+    def test_specific_page_alone(self, simple_pdf: Path) -> None:
+        """Caller can still pin a tight slice by setting end_page == page."""
+        result = extract_text(str(simple_pdf), page=3, end_page=3)
+        assert [p["page"] for p in result["pages"]] == [3]
         assert "Searchable_marker" in result["pages"][0]["text"]
+        assert result["has_more"] is False
+        assert result["next_page"] is None
+
+    def test_default_from_middle_page(self, simple_pdf: Path) -> None:
+        result = extract_text(str(simple_pdf), page=2)
+        assert [p["page"] for p in result["pages"]] == [2, 3]
         assert result["has_more"] is False
         assert result["next_page"] is None
 
@@ -69,25 +76,34 @@ class TestExtractText:
         result = extract_text(str(simple_pdf), page=1, end_page=3)
         assert [p["page"] for p in result["pages"]] == [1, 2, 3]
         assert result["has_more"] is False
+        assert result["next_page"] is None
+
+    def test_partial_range_signals_next_page(self, simple_pdf: Path) -> None:
+        """An explicit range that stops short of the end advertises the next page."""
+        result = extract_text(str(simple_pdf), page=1, end_page=2)
+        assert [p["page"] for p in result["pages"]] == [1, 2]
+        assert result["has_more"] is True
+        assert result["next_page"] == 3
 
     def test_out_of_range_clamps(self, simple_pdf: Path) -> None:
-        result = extract_text(str(simple_pdf), page=99)
+        result = extract_text(str(simple_pdf), page=99, end_page=99)
         assert result["pages"][0]["page"] == 3
+        assert result["has_more"] is False
 
     def test_response_fits_budget(self, large_pdf: Path) -> None:
-        result = extract_text(str(large_pdf), page=1, end_page=80)
+        """Default (end-of-doc) on a large PDF must still fit under the budget."""
+        result = extract_text(str(large_pdf))
         size = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
         assert size <= RESPONSE_BUDGET_BYTES
-        # Either we got all pages, or has_more is set with next_page.
         if result["has_more"]:
             assert result["next_page"] is not None
             assert 1 < result["next_page"] <= 80
 
     def test_has_more_resumable(self, large_pdf: Path) -> None:
         """After hitting has_more, calling again from next_page yields fresh content."""
-        first = extract_text(str(large_pdf), page=1, end_page=80)
+        first = extract_text(str(large_pdf))
         assert first["has_more"] is True
-        second = extract_text(str(large_pdf), page=first["next_page"], end_page=80)
+        second = extract_text(str(large_pdf), page=first["next_page"])
         # First page of the resumed call should be ``next_page`` from the first call.
         assert second["pages"][0]["page"] == first["next_page"]
 

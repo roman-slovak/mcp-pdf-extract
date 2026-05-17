@@ -112,31 +112,36 @@ def extract_text(
         int | None,
         Field(
             description=(
-                "1-indexed last page (inclusive). Omit to extract only `page`. "
-                "Large ranges may stop early — watch `has_more` and `next_page` "
-                "in the response and call again from `next_page` to resume."
+                "1-indexed last page (inclusive). Omit (recommended) to read from "
+                "`page` to the end of the document — the response fits as many pages "
+                "as the ~40KB budget allows. Set explicitly only when you want a "
+                "tight slice. If `has_more` is true in the response, call again with "
+                "`page = next_page` to keep reading."
             ),
             ge=1,
         ),
     ] = None,
 ) -> dict[str, Any]:
-    """Extract the actual text from a page range. THIS is the tool to call whenever
-    the user asks "what is in the document", "summarize", "what does it say", or any
-    question about contents. Do not infer contents from the title or metadata.
+    """Extract the actual text from a PDF. THIS is the tool to call whenever the user
+    asks "what is in the document", "summarize", "what does it say", or any question
+    about contents. Do not infer contents from the title or metadata.
 
-    Page numbers are 1-indexed, inclusive. Stops early if the accumulated response
-    would exceed ~40KB and reports ``has_more`` with ``next_page`` so you can call
-    again from ``next_page`` to keep reading. Single-page calls always succeed even
-    if that page is huge (the page text gets truncated with a marker).
+    Default behavior (``end_page`` omitted) reads from ``page`` to the end of the
+    document, packing as many pages as fit in ~40KB. ``has_more`` in the response
+    means there are still unread pages in the document; call again with
+    ``page = next_page`` to continue. A 16-page text-only PDF typically fits in
+    one call.
     """
     pdf_path = resolve_pdf_path(path)
     with pdfplumber.open(pdf_path) as pdf:
         page_count = len(pdf.pages)
-        start_0, end_0 = normalize_range(page, end_page, page_count)
+        # Default: read from `page` to end of document. Explicit end_page wins.
+        effective_end = end_page if end_page is not None else page_count
+        start_0, end_0 = normalize_range(page, effective_end, page_count)
 
         pages_out: list[dict[str, Any]] = []
         running_bytes = 0
-        has_more = False
+        stopped_early = False
         next_page: int | None = None
 
         for idx in range(start_0, end_0 + 1):
@@ -146,7 +151,7 @@ def extract_text(
 
             if running_bytes + entry_size > RESPONSE_BUDGET_BYTES and pages_out:
                 # We already have at least one page — stop here and let caller resume.
-                has_more = True
+                stopped_early = True
                 next_page = idx + 1
                 break
 
@@ -159,15 +164,15 @@ def extract_text(
             pages_out.append(entry)
             running_bytes += entry_size
 
-        completed_range = (
-            not has_more
-            and pages_out
-            and pages_out[-1]["page"] == end_0 + 1
-            and end_0 + 1 < page_count
-        )
-        if completed_range:
-            # Hint the caller toward the page after the last one we returned.
-            next_page = end_0 + 2
+        # has_more reflects whether more pages exist in the *document* past what we
+        # returned, not whether the requested range was truncated. This matches what
+        # a model actually wants to know: "should I call again?"
+        last_returned = pages_out[-1]["page"] if pages_out else 0
+        has_more = last_returned < page_count
+        if not stopped_early and has_more:
+            next_page = last_returned + 1
+        if not has_more:
+            next_page = None
 
     return {
         "path": str(pdf_path),
