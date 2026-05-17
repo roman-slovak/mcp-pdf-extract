@@ -8,11 +8,12 @@ defined in :mod:`pdf_utils`. Page numbers are 1-indexed in the public API.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 import pdfplumber
 import pypdf
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from .pdf_utils import (
     RESPONSE_BUDGET_BYTES,
@@ -23,6 +24,15 @@ from .pdf_utils import (
 )
 
 mcp = FastMCP("pdf-extract")
+
+# The single most important rule the model must learn — surfaced in every tool's schema
+# so a weak model sees it on every call, not just once in a system prompt.
+_PATH_DESCRIPTION = (
+    "Absolute path to a PDF file. MUST start with '/' (or '~/'). The server does NOT "
+    "search anywhere — bare filenames will fail. If the user gave only a filename, "
+    "assume the file is in /Users/roman/Downloads/ and pass the full path."
+)
+PathArg = Annotated[str, Field(description=_PATH_DESCRIPTION)]
 
 
 def _stringify(value: Any) -> str | None:
@@ -36,7 +46,7 @@ def _stringify(value: Any) -> str | None:
 
 
 @mcp.tool()
-def get_metadata(path: str) -> dict[str, Any]:
+def get_metadata(path: PathArg) -> dict[str, Any]:
     """Return PDF metadata: title, author, dates, page count, encryption status."""
     pdf_path = resolve_pdf_path(path)
     reader = pypdf.PdfReader(str(pdf_path))
@@ -56,7 +66,7 @@ def get_metadata(path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_page_count(path: str) -> dict[str, int]:
+def get_page_count(path: PathArg) -> dict[str, int]:
     """Return the number of pages in the PDF."""
     pdf_path = resolve_pdf_path(path)
     reader = pypdf.PdfReader(str(pdf_path))
@@ -79,7 +89,19 @@ def _extract_page_text(page: pdfplumber.page.Page) -> str:
 
 @mcp.tool()
 def extract_text(
-    path: str, page: int = 1, end_page: int | None = None
+    path: PathArg,
+    page: Annotated[int, Field(description="1-indexed page to start from.", ge=1)] = 1,
+    end_page: Annotated[
+        int | None,
+        Field(
+            description=(
+                "1-indexed last page (inclusive). Omit to extract only `page`. "
+                "Large ranges may stop early — watch `has_more` and `next_page` "
+                "in the response and call again from `next_page` to resume."
+            ),
+            ge=1,
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Extract text from a page range. 1-indexed, inclusive.
 
@@ -137,7 +159,10 @@ def extract_text(
 
 
 @mcp.tool()
-def extract_tables(path: str, page: int = 1) -> dict[str, Any]:
+def extract_tables(
+    path: PathArg,
+    page: Annotated[int, Field(description="1-indexed page number.", ge=1)] = 1,
+) -> dict[str, Any]:
     """Extract tables from a single page as a list of 2D string arrays.
 
     Drops trailing rows / tables if the JSON-encoded response would exceed the budget,
@@ -178,10 +203,15 @@ def extract_tables(path: str, page: int = 1) -> dict[str, Any]:
 
 @mcp.tool()
 def search_text(
-    path: str,
-    query: str,
-    max_matches: int = 20,
-    context_chars: int = 120,
+    path: PathArg,
+    query: Annotated[str, Field(description="Substring to search for (case-insensitive).")],
+    max_matches: Annotated[
+        int, Field(description="Maximum number of snippets to return.", ge=1)
+    ] = 20,
+    context_chars: Annotated[
+        int,
+        Field(description="Characters of context on each side of the match.", ge=0),
+    ] = 120,
 ) -> dict[str, Any]:
     """Case-insensitive substring search across all pages.
 
@@ -270,7 +300,7 @@ def _flatten_outline(
 
 
 @mcp.tool()
-def get_outline(path: str) -> dict[str, Any]:
+def get_outline(path: PathArg) -> dict[str, Any]:
     """Return the PDF's table of contents (bookmarks) as a flat list, or empty if none."""
     pdf_path = resolve_pdf_path(path)
     reader = pypdf.PdfReader(str(pdf_path))
